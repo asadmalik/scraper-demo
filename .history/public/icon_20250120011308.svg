@@ -1,0 +1,36 @@
+<svg
+  width="48"
+  height="48"
+  viewBox="0 0 48 48"
+  fill="none"
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <!-- Background with rounded corners -->
+  <rect x="0" y="0" width="48" height="48" rx="8" fill="#EEF6FF" />
+
+  <!-- Envelope body -->
+  <path 
+    d="M12 18h24c2.21 0 4 1.79 4 4v12c0 2.21-1.79 4-4 4H12c-2.21 0-4-1.79-4-4V22c0-2.21 1.79-4 4-4z" 
+    fill="#FFF"
+  />
+
+  <!-- Envelope flap -->
+  <path 
+    d="M12 18l12 10 12-10" 
+    stroke="#3772FF" 
+    stroke-width="2" 
+    fill="none" 
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- Magnifying glass (circle + short handle) -->
+  <path
+    d="M32 8a4 4 0 100 8 4 4 0 000-8zm2.83 4.83l3 3"
+    stroke="#3772FF"
+    stroke-width="2"
+    fill="none"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

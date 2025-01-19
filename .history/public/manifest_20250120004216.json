@@ -1,0 +1,27 @@
+{
+    "action": {
+        "default_popup": "popup.html"
+    },
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "js": [
+                "contentScript.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ],
+    "description": "Scrape emails from a webpage with Vue 3 + Tailwind + Vite.",
+    "manifest_version": 3,
+    "name": "Vue Email Scraper Extension",
+    "permissions": [
+        "activeTab",
+        "storage",
+        "scripting"
+    ],
+    "version": "0.0.1"
+}
