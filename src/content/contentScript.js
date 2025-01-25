@@ -1,89 +1,108 @@
-// src/content/contentScript.js
+// contentScript.js
 
-console.log("Content script loaded")
+console.log("Content script loaded");
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === "SCRAPE_EMAILS") {
-    const foundEmails = scrapeEmailsByRegex()
-    sendResponse({ emails: foundEmails })
-  }
-  else if (request.type === "TEST_SELECTOR") {
-    console.log('TEST_SELECTOR call received')
-    //#mfe-app-container > div > div > main > div:nth-child(1) > div > article > div > table > thead:nth-child(2)
-    //const Elem = document.querySelector("#mfe-app-container > div > div > main > div:nth-child(1) > div > article > div > table > thead:nth-child(2)")
-    //console.log('element inside content script: ', Elem)
-    //const elemHTML = Elem ? Elem.outerHTML : null
-    console.log('content script, selector value received: ', request.selector)
-    const thead = document.querySelector(request.selector);
-    const headers = [];
-    if (thead) {
-      const thEls = thead.querySelectorAll("th, td");
-      thEls.forEach(th => {
-        
-          headers.push(th.innerText.trim())
-        
-      });
-    }
-    console.log('headers content script: ', headers)
-    sendResponse({ headerTitles:  headers })
-    //sendResponse({ elem: 'elemHTML.slice(32)[0]' })
-  }
-  else if (request.type === 'SCRAPE_HEURISTIC') {
-    // 1) Attempt table-based scraping
-    const result = heuristicTableScrape()
-    // 2) Fallback: do a global email/phone scrape if table is empty
-    console.log('csrpt results: ', result)
-    if (!result || !result.length) {
-      const fallback = scrapeByRegex();
-      console.log('csrpt fallback results: ', fallback)
-      sendResponse({ data: fallback, usedFallback: true });
-    } else {
-      sendResponse({ data: result, usedFallback: false });
-    }
-  }
-})
-
-function scrapeEmailsByRegex() {
-  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]+/g
-  const textContent = document.body.innerText
-  const matches = textContent.match(regex) || []
-  // Optional: remove duplicates or do something more advanced
-  return Array.from(new Set(matches))
+/**
+ * A simple function to wait (async/await).
+ */
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Simple regex-based scrape of all emails on the page (document.body.innerText).
+ */
+function scrapeEmailsByRegex() {
+  const regex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]+/g;
+  const textContent = document.body.innerText || "";
+  const matches = textContent.match(regex) || [];
+  return Array.from(new Set(matches)); // unique
+}
 
+/**
+ * Auto-scroll approach:
+ *  - Scroll to bottom,
+ *  - Wait,
+ *  - Scrape new emails,
+ *  - Stop if no new emails since last scroll or max scroll attempts reached.
+ */
+async function autoScrollAndScrapeEmails(options = {}) {
+  console.log("autoScrollAndScrape called with options:", options);
 
+  const {
+    maxScrollAttempts = 50,
+    scrollDelay = 3000, // ms
+    noNewDataStop = true,
+  } = options;
 
-// 1) Check for tables with known columns
+  let allEmails = new Set();
+  let previousCount = 0;
+
+  for (let i = 0; i < maxScrollAttempts; i++) {
+    // 1) Scroll to bottom
+    window.scrollTo(0, document.body.scrollHeight);
+
+    // 2) Wait for lazy load
+    await wait(scrollDelay);
+
+    // 3) Scrape
+    const newEmails = scrapeEmailsByRegex();
+    newEmails.forEach(e => allEmails.add(e));
+
+    console.log(
+      `[autoScrollAndScrapeEmails] After scroll #${i}, total unique emails: ${allEmails.size}`,
+      allEmails
+    );
+
+    // 4) If no new emails found => stop
+    if (noNewDataStop && allEmails.size === previousCount) {
+      console.log(`[autoScrollAndScrapeEmails] No new emails on scroll #${i}. Stopping.`);
+      break;
+    }
+    previousCount = allEmails.size;
+  }
+
+  return Array.from(allEmails);
+}
+
+/**
+ * Heuristic table-scrape approach:
+ *  - Looks for all <table> elements.
+ *  - Finds the first <thead> in each table.
+ *  - Creates a "colMap" from the text of each TH/TD in that thead row.
+ *  - Then scans <tbody> tr to see if colMap includes "EMAIL"/"PHONE"/"NAME".
+ *  - Returns an array of row objects.
+ */
 function heuristicTableScrape() {
-  const tables = Array.from(document.querySelectorAll('table'));
+  const tables = Array.from(document.querySelectorAll("table"));
   const allRows = [];
 
   tables.forEach(table => {
-    const headerRow = table.querySelector('thead');
-    if (!headerRow) return;
+    // get the first <thead> (some pages have multiple <thead>)
+    const thead = table.querySelector("thead");
+    if (!thead) return;
 
-    const headerCells = Array.from(headerRow.querySelectorAll('th, td'));
-    console.log('headerCells: ', headerCells)
+    const headerCells = Array.from(thead.querySelectorAll("th, td"));
+    console.log("headerCells in heuristic:", headerCells);
     const colMap = headerCells.map(cell => cell.innerText.trim().toUpperCase());
 
-    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    // gather rows in <tbody>
+    const rows = Array.from(table.querySelectorAll("tbody tr"));
     rows.forEach(row => {
-      const cells = Array.from(row.querySelectorAll('td'));
+      const cells = Array.from(row.querySelectorAll("td"));
       const rowData = {};
 
       colMap.forEach((colText, i) => {
-        if (colText.includes('EMAIL')) {
+        if (colText.includes("EMAIL")) {
           rowData.email = cells[i]?.innerText.trim();
-        } else if (colText.includes('PHONE') || colText.includes('MOBILE')) {
+        } else if (colText.includes("PHONE") || colText.includes("MOBILE")) {
           rowData.phone = cells[i]?.innerText.trim();
-        } else if (colText.includes('NAME')) {
+        } else if (colText.includes("NAME")) {
           rowData.name = cells[i]?.innerText.trim();
         }
-        // etc. for other fields
+        // etc. if you want more fields
       });
 
-      // If we found something
       if (Object.keys(rowData).length > 0) {
         allRows.push(rowData);
       }
@@ -93,16 +112,71 @@ function heuristicTableScrape() {
   return allRows;
 }
 
-// 2) Global regex fallback
-function scrapeByRegex() {
-  const text = document.body.innerText;
+/**
+ * Fallback global approach to find both emails & phone # in the entire page text.
+ */
+function scrapeByRegex2() {
+  const text = document.body.innerText || "";
+
+  // Basic email
   const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]+/g;
-  const phoneRegex = /\(?([0-9]{3})\)?([ .-]?)([0-9]{3})\2([0-9]{4})/; ///\+?\d{1,3}[.\-\s]?\(?\d{2,3}\)?[.\-\s]\d{3,4}[.\-\s]\d{3,4}/g;
+  // A naive phone pattern (3-3-4)
+  const phoneRegex = /\(?([0-9]{3})\)?([ .-]?)([0-9]{3})\2([0-9]{4})/g;
 
   const emails = Array.from(new Set(text.match(emailRegex) || []));
   const phones = Array.from(new Set(text.match(phoneRegex) || []));
-  console.log('phones caught: ', phones)
+  console.log("fallback phones caught:", phones);
+
   return { emails, phones };
 }
 
-// TODO: We'll add "scrapeBySelector" next if needed
+/**
+ * Listen for messages from popup or background scripts
+ */
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.type === "SCRAPE_EMAILS") {
+    const foundEmails = scrapeEmailsByRegex();
+    sendResponse({ emails: foundEmails });
+  }
+  else if (request.type === "AUTO_SCROLL_SCRAPE") {
+    console.log("Received AUTO_SCROLL_SCRAPE message.");
+    autoScrollAndScrapeEmails({ maxScrollAttempts: 20, scrollDelay: 2000 })
+      .then(resultEmails => {
+        console.log("AutoScroll done. Found emails:", resultEmails);
+        sendResponse({ emails: resultEmails });
+      })
+      .catch(err => {
+        console.error("Error in autoScrollAndScrapeEmails:", err);
+        sendResponse({ emails: [], error: String(err) });
+      });
+    return true; // Must return true to keep message channel open for async
+  }
+  else if (request.type === "SCRAPE_HEURISTIC") {
+    // Attempt the table-based approach
+    const result = heuristicTableScrape();
+    console.log("Heuristic results:", result);
+
+    if (!result || !result.length) {
+      // fallback
+      const fallback = scrapeByRegex2();
+      console.log("Heuristic fallback results:", fallback);
+      sendResponse({ data: fallback, usedFallback: true });
+    } else {
+      sendResponse({ data: result, usedFallback: false });
+    }
+  }
+  else if (request.type === "TEST_SELECTOR") {
+    console.log("TEST_SELECTOR call received. Selector:", request.selector);
+    const thead = document.querySelector(request.selector);
+    const headers = [];
+
+    if (thead) {
+      const thEls = thead.querySelectorAll("th, td");
+      thEls.forEach(th => {
+        headers.push(th.innerText.trim());
+      });
+    }
+    console.log("headers from TEST_SELECTOR:", headers);
+    sendResponse({ headerTitles: headers });
+  }
+});
