@@ -1,182 +1,269 @@
 // contentScript.js
 
-console.log("Content script loaded");
+console.log("[contentScript] Loaded.");
 
-/**
- * A simple function to wait (async/await).
- */
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+/********************************************************
+ * GLOBAL STATE
+ ********************************************************/
 
-/**
- * Simple regex-based scrape of all emails on the page (document.body.innerText).
- */
-function scrapeEmailsByRegex() {
-  const regex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]+/g;
-  const textContent = document.body.innerText || "";
-  const matches = textContent.match(regex) || [];
-  return Array.from(new Set(matches)); // unique
-}
+let scannedTables = [];         // { tableElement, index, highlighted, rowCount, columns[] }
+let collectedData = {};         // collectedData[tableIndex] = array of row objects
+let seenRowIds = {};            // seenRowIds[tableIndex] = Set of row IDs
+let currentObserver = null;     // MutationObserver instance
+let currentObservedTableIndex = null;  // which table we're observing, if any
 
-/**
- * Auto-scroll approach:
- *  - Scroll to bottom,
- *  - Wait,
- *  - Scrape new emails,
- *  - Stop if no new emails since last scroll or max scroll attempts reached.
- */
-async function autoScrollAndScrapeEmails(options = {}) {
-  console.log("autoScrollAndScrape called with options:", options);
+/********************************************************
+ * SCAN TABLES
+ ********************************************************/
+function scanTablesOnPage() {
+  const tables = Array.from(document.querySelectorAll("table"));
+  scannedTables = [];
 
-  const {
-    maxScrollAttempts = 50,
-    scrollDelay = 3000, // ms
-    noNewDataStop = true,
-  } = options;
+  tables.forEach((table, idx) => {
+    // count <tbody> rows
+    let rowCount = 0;
+    const tbodies = table.querySelectorAll("tbody");
+    tbodies.forEach(tb => {
+      rowCount += tb.querySelectorAll("tr").length;
+    });
 
-  let allEmails = new Set();
-  let previousCount = 0;
-
-  for (let i = 0; i < maxScrollAttempts; i++) {
-    // 1) Scroll to bottom
-    window.scrollTo(0, document.body.scrollHeight);
-
-    // 2) Wait for lazy load
-    await wait(scrollDelay);
-
-    // 3) Scrape
-    const newEmails = scrapeEmailsByRegex();
-    newEmails.forEach(e => allEmails.add(e));
-
-    console.log(
-      `[autoScrollAndScrapeEmails] After scroll #${i}, total unique emails: ${allEmails.size}`,
-      allEmails
-    );
-
-    // 4) If no new emails found => stop
-    if (noNewDataStop && allEmails.size === previousCount) {
-      console.log(`[autoScrollAndScrapeEmails] No new emails on scroll #${i}. Stopping.`);
-      break;
+    // gather columns from first <thead> row
+    let columns = [];
+    const thead = table.querySelector("thead");
+    if (thead) {
+      const firstRow = thead.querySelector("tr");
+      if (firstRow) {
+        const headerCells = Array.from(firstRow.querySelectorAll("th, td"));
+        columns = headerCells.map((cell, colIndex) => ({
+          colIndex,
+          text: cell.innerText.trim(),
+          highlighted: false
+        }));
+      }
     }
-    previousCount = allEmails.size;
+
+    scannedTables.push({
+      tableElement: table,
+      index: idx,
+      highlighted: false,
+      rowCount,
+      columns
+    });
+
+    // init data arrays
+    if (!collectedData[idx]) {
+      collectedData[idx] = [];
+    }
+    if (!seenRowIds[idx]) {
+      seenRowIds[idx] = new Set();
+    }
+  });
+
+  // return minimal info for the popup
+  return scannedTables.map(tbl => ({
+    index: tbl.index,
+    rowCount: tbl.rowCount,
+    columns: tbl.columns.map(c => ({
+      colIndex: c.colIndex,
+      text: c.text
+    }))
+  }));
+}
+
+/********************************************************
+ * HIGHLIGHT TABLE/COLUMN
+ ********************************************************/
+function toggleTableHighlight(tableIndex, shouldHighlight) {
+  const tblInfo = scannedTables.find(t => t.index === tableIndex);
+  if (!tblInfo) return;
+  tblInfo.highlighted = shouldHighlight;
+
+  const el = tblInfo.tableElement;
+  if (shouldHighlight) {
+    el.style.outline = "2px dotted rgba(255, 0, 0, 0.6)";
+    el.style.backgroundColor = "rgba(255, 0, 0, 0.07)";
+  } else {
+    el.style.outline = "";
+    el.style.backgroundColor = "";
+  }
+}
+
+function toggleColumnHighlight(tableIndex, colIndex, shouldHighlight) {
+  const tblInfo = scannedTables.find(t => t.index === tableIndex);
+  if (!tblInfo) return;
+
+  const table = tblInfo.tableElement;
+  // highlight <thead>
+  const thead = table.querySelector("thead");
+  if (thead) {
+    const firstRow = thead.querySelector("tr");
+    if (firstRow) {
+      const cells = firstRow.querySelectorAll("th, td");
+      if (cells[colIndex]) {
+        cells[colIndex].style.backgroundColor = shouldHighlight ? "rgba(0, 128, 255, 0.15)" : "";
+      }
+    }
   }
 
-  return Array.from(allEmails);
-}
-
-/**
- * Heuristic table-scrape approach:
- *  - Looks for all <table> elements.
- *  - Finds the first <thead> in each table.
- *  - Creates a "colMap" from the text of each TH/TD in that thead row.
- *  - Then scans <tbody> tr to see if colMap includes "EMAIL"/"PHONE"/"NAME".
- *  - Returns an array of row objects.
- */
-function heuristicTableScrape() {
-  const tables = Array.from(document.querySelectorAll("table"));
-  const allRows = [];
-
-  tables.forEach(table => {
-    // get the first <thead> (some pages have multiple <thead>)
-    const thead = table.querySelector("thead");
-    if (!thead) return;
-
-    const headerCells = Array.from(thead.querySelectorAll("th, td"));
-    console.log("headerCells in heuristic:", headerCells);
-    const colMap = headerCells.map(cell => cell.innerText.trim().toUpperCase());
-
-    // gather rows in <tbody>
-    const rows = Array.from(table.querySelectorAll("tbody tr"));
+  // highlight <tbody>
+  const tbodies = table.querySelectorAll("tbody");
+  tbodies.forEach(tb => {
+    const rows = tb.querySelectorAll("tr");
     rows.forEach(row => {
-      const cells = Array.from(row.querySelectorAll("td"));
-      const rowData = {};
-
-      colMap.forEach((colText, i) => {
-        if (colText.includes("EMAIL")) {
-          rowData.email = cells[i]?.innerText.trim();
-        } else if (colText.includes("PHONE") || colText.includes("MOBILE")) {
-          rowData.phone = cells[i]?.innerText.trim();
-        } else if (colText.includes("NAME")) {
-          rowData.name = cells[i]?.innerText.trim();
-        }
-        // etc. if you want more fields
-      });
-
-      if (Object.keys(rowData).length > 0) {
-        allRows.push(rowData);
+      const cells = row.querySelectorAll("td");
+      if (cells[colIndex]) {
+        cells[colIndex].style.backgroundColor = shouldHighlight ? "rgba(0, 128, 255, 0.15)" : "";
       }
     });
   });
+}
 
-  return allRows;
+/********************************************************
+ * MUTATION OBSERVER & ROW PARSING
+ ********************************************************/
+
+/**
+ * Start observing a table for changes. We'll parse *all rows* once, then for each
+ * childList mutation, re-parse all rows again. This ensures we catch new data
+ * even if the site re-renders or replaces entire chunks.
+ */
+function startObservingTable(tableIndex) {
+  stopObservingTable(); // in case we were observing another one
+
+  const tblInfo = scannedTables.find(t => t.index === tableIndex);
+  if (!tblInfo) return;
+  const tableEl = tblInfo.tableElement;
+
+  currentObservedTableIndex = tableIndex;
+
+  // re-init our stored data if you want a fresh start
+  // or we can keep the old data. 
+  // For a fresh approach:
+  collectedData[tableIndex] = [];
+  seenRowIds[tableIndex].clear();
+
+  // parse all existing rows
+  parseAllRowsAndAppend(tableIndex);
+
+  // set up observer
+  currentObserver = new MutationObserver(mutationList => {
+    let relevantChange = false;
+    for (const mutation of mutationList) {
+      if (mutation.type === "childList") {
+        // If the site re-renders <tr> or <tbody>, we want to re-parse
+        relevantChange = true;
+        break;
+      }
+    }
+    // If relevant changes, re-parse
+    if (relevantChange) {
+      parseAllRowsAndAppend(tableIndex);
+    }
+  });
+
+  currentObserver.observe(tableEl, {
+    childList: true,
+    subtree: true
+  });
+}
+
+function stopObservingTable() {
+  if (currentObserver) {
+    currentObserver.disconnect();
+    currentObserver = null;
+  }
+  currentObservedTableIndex = null;
 }
 
 /**
- * Fallback global approach to find both emails & phone # in the entire page text.
+ * Parse all <tbody> rows, build row ID, append new ones to collectedData if not seen.
  */
-function scrapeByRegex2() {
-  const text = document.body.innerText || "";
+function parseAllRowsAndAppend(tableIndex) {
+  const tblInfo = scannedTables.find(t => t.index === tableIndex);
+  if (!tblInfo) return;
+  const tableEl = tblInfo.tableElement;
 
-  // Basic email
-  const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]+/g;
-  // A naive phone pattern (3-3-4)
-  const phoneRegex = /\(?([0-9]{3})\)?([ .-]?)([0-9]{3})\2([0-9]{4})/g;
-
-  const emails = Array.from(new Set(text.match(emailRegex) || []));
-  const phones = Array.from(new Set(text.match(phoneRegex) || []));
-  console.log("fallback phones caught:", phones);
-
-  return { emails, phones };
+  const tbodies = tableEl.querySelectorAll("tbody");
+  tbodies.forEach(tb => {
+    const rows = tb.querySelectorAll("tr");
+    rows.forEach(row => {
+      const rowId = getRowId(row);
+      if (!seenRowIds[tableIndex].has(rowId)) {
+        seenRowIds[tableIndex].add(rowId);
+        const rowValues = parseRowValues(row);
+        collectedData[tableIndex].push({ rowId, rowValues });
+      }
+    });
+  });
 }
 
 /**
- * Listen for messages from popup or background scripts
+ * Row ID function: use entire row text as the ID or do a real hash if collisions matter.
  */
+function getRowId(tr) {
+  return tr.innerText.trim();
+}
+
+/**
+ * Convert <td> text to array
+ */
+function parseRowValues(tr) {
+  return Array.from(tr.querySelectorAll("td")).map(td => td.innerText.trim());
+}
+
+/**
+ * Get all the data we have for tableIndex
+ */
+function getCollectedData(tableIndex) {
+  return collectedData[tableIndex] || [];
+}
+
+/********************************************************
+ * GET OBSERVER STATE
+ * so popup can re-initialize if needed
+ ********************************************************/
+function getObserverState() {
+  return {
+    currentObservedTableIndex
+  };
+}
+
+/********************************************************
+ * MESSAGE HANDLER
+ ********************************************************/
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === "SCRAPE_EMAILS") {
-    const foundEmails = scrapeEmailsByRegex();
-    sendResponse({ emails: foundEmails });
+  if (request.type === "SCAN_TABLES") {
+    const data = scanTablesOnPage();
+    sendResponse({ tables: data });
+    return true;
   }
-  else if (request.type === "AUTO_SCROLL_SCRAPE") {
-    console.log("Received AUTO_SCROLL_SCRAPE message.");
-    autoScrollAndScrapeEmails({ maxScrollAttempts: 20, scrollDelay: 2000 })
-      .then(resultEmails => {
-        console.log("AutoScroll done. Found emails:", resultEmails);
-        sendResponse({ emails: resultEmails });
-      })
-      .catch(err => {
-        console.error("Error in autoScrollAndScrapeEmails:", err);
-        sendResponse({ emails: [], error: String(err) });
-      });
-    return true; // Must return true to keep message channel open for async
+  else if (request.type === "TOGGLE_TABLE_HIGHLIGHT") {
+    toggleTableHighlight(request.tableIndex, request.highlight);
+    sendResponse({ success: true });
+    return true;
   }
-  else if (request.type === "SCRAPE_HEURISTIC") {
-    // Attempt the table-based approach
-    const result = heuristicTableScrape();
-    console.log("Heuristic results:", result);
-
-    if (!result || !result.length) {
-      // fallback
-      const fallback = scrapeByRegex2();
-      console.log("Heuristic fallback results:", fallback);
-      sendResponse({ data: fallback, usedFallback: true });
-    } else {
-      sendResponse({ data: result, usedFallback: false });
-    }
+  else if (request.type === "TOGGLE_COLUMN_HIGHLIGHT") {
+    toggleColumnHighlight(request.tableIndex, request.colIndex, request.highlight);
+    sendResponse({ success: true });
+    return true;
   }
-  else if (request.type === "TEST_SELECTOR") {
-    console.log("TEST_SELECTOR call received. Selector:", request.selector);
-    const thead = document.querySelector(request.selector);
-    const headers = [];
-
-    if (thead) {
-      const thEls = thead.querySelectorAll("th, td");
-      thEls.forEach(th => {
-        headers.push(th.innerText.trim());
-      });
-    }
-    console.log("headers from TEST_SELECTOR:", headers);
-    sendResponse({ headerTitles: headers });
+  else if (request.type === "START_OBSERVE_TABLE") {
+    startObservingTable(request.tableIndex);
+    sendResponse({ success: true });
+    return true;
+  }
+  else if (request.type === "STOP_OBSERVE_TABLE") {
+    stopObservingTable();
+    sendResponse({ success: true });
+    return true;
+  }
+  else if (request.type === "GET_COLLECTED_DATA") {
+    const data = getCollectedData(request.tableIndex);
+    sendResponse({ data });
+    return true;
+  }
+  else if (request.type === "GET_OBSERVER_STATE") {
+    sendResponse(getObserverState());
+    return true;
   }
 });

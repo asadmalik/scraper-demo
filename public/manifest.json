@@ -15,18 +15,18 @@
             ]
         }
     ],
-    "description": "Scrape emails from a webpage with Vue 3 + Tailwind + Vite.",
+    "description": "Scrape emails from a webpage with ScraperOne.",
     "icons": {
-        "16": "icon.svg",
-        "48": "icon.svg",
-        "128": "icon.svg"
+        "16": "icon@16.png",
+        "48": "icon@48.png",
+        "128": "icon@128.png"
     },
     "manifest_version": 3,
-    "name": "Vue Email Scraper Extension",
+    "name": "ScraperOne",
     "permissions": [
         "activeTab",
         "storage",
         "scripting"
     ],
-    "version": "0.0.1"
+    "version": "0.0.5"
 }
